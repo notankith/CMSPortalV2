@@ -27,17 +27,19 @@ export interface UploadMetrics {
  * Detect network connection type and quality
  */
 export function detectNetworkQuality(): NetworkDiagnostics {
-  const connection =
-    (navigator as any).connection || (navigator as any).mozConnection || (navigator as any).webkitConnection
+  const hasNavigator = typeof navigator !== "undefined"
+  const navConnection = hasNavigator
+    ? (navigator as any).connection || (navigator as any).mozConnection || (navigator as any).webkitConnection
+    : null
 
   let connectionType = "unknown"
   let bandwidth = 0
   let latency = 0
 
-  if (connection) {
-    connectionType = connection.effectiveType || "unknown"
-    bandwidth = connection.downlink ? connection.downlink * 1024 * 1024 : 0 // Convert Mbps to bytes/s
-    latency = connection.rtt || 0
+  if (navConnection) {
+    connectionType = navConnection.effectiveType || "unknown"
+    bandwidth = navConnection.downlink ? navConnection.downlink * 1024 * 1024 : 0 // Convert Mbps to bytes/s
+    latency = navConnection.rtt || 0
   }
 
   // Estimate based on connection type if not available
@@ -49,6 +51,11 @@ export function detectNetworkQuality(): NetworkDiagnostics {
       wifi: 50 * 1024 * 1024, // 50 Mbps
     }
     bandwidth = typeEstimates[connectionType] || 5 * 1024 * 1024 // Default 5 Mbps
+  }
+
+  // On server environments we may not have latency info; leave at 0.
+  if (!hasNavigator) {
+    connectionType = "server"
   }
 
   const isSlowConnection = bandwidth < 1 * 1024 * 1024 // Less than 1 Mbps
