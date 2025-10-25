@@ -278,3 +278,19 @@ export async function POST(request: NextRequest) {
     )
   }
 }
+
+// Run this route on the Node.js runtime (not Edge) so it can handle large
+// multipart uploads and use the native `formData()` implementation. On Vercel
+// Edge runtime there are stricter limits and some Node APIs are unavailable.
+export const runtime = "nodejs"
+
+// Increase bodyParser size limit for this route so large uploads are allowed.
+// This is a per-route setting (Next 13+). Adjust as needed based on your
+// expected max upload size.
+export const config = {
+  api: {
+    bodyParser: {
+      sizeLimit: "5gb",
+    },
+  },
+}
