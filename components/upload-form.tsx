@@ -1,7 +1,8 @@
 "use client"
 
-import type { React } from "react"
+import type { ChangeEvent, DragEvent, FormEvent } from "react"
 import { useState, useRef, useEffect } from "react"
+import { upload as uploadToBlob } from "@vercel/blob/client"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -51,7 +52,7 @@ export function UploadForm({ editorId, editorName, editorType, onUploadSuccess }
     return () => clearInterval(interval)
   }, [])
 
-  const handleDrag = (e: React.DragEvent) => {
+  const handleDrag = (e: DragEvent) => {
     e.preventDefault()
     e.stopPropagation()
     if (e.type === "dragenter" || e.type === "dragover") {
@@ -61,7 +62,7 @@ export function UploadForm({ editorId, editorName, editorType, onUploadSuccess }
     }
   }
 
-  const handleDrop = (e: React.DragEvent) => {
+  const handleDrop = (e: DragEvent) => {
     e.preventDefault()
     e.stopPropagation()
     setIsDragActive(false)
@@ -73,14 +74,14 @@ export function UploadForm({ editorId, editorName, editorType, onUploadSuccess }
     }
   }
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileChange = (e: ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
       setFile(e.target.files[0])
       setError(null)
     }
   }
 
-  const handleThumbnailChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleThumbnailChange = (e: ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
       setThumbnail(e.target.files[0])
       setError(null)
@@ -98,6 +99,40 @@ export function UploadForm({ editorId, editorName, editorType, onUploadSuccess }
     const mbps = bytesPerSecond / 1024 / 1024
     if (mbps < 1) return `${(bytesPerSecond / 1024).toFixed(2)} KB/s`
     return `${mbps.toFixed(2)} MB/s`
+  }
+
+  const sanitizeFileName = (name: string) => name.replace(/[^a-zA-Z0-9_.-]/g, "_")
+
+  const uploadBlob = async (
+    fileToUpload: File,
+    options: {
+      mediaType: "video" | "image"
+      isThumbnail?: boolean
+      onProgress?: (payload: { loaded: number; total: number; percentage: number }) => void
+    },
+  ) => {
+    const timestamp = Date.now()
+    const directory = options.isThumbnail ? "thumbnails" : "uploads"
+    const sanitized = sanitizeFileName(fileToUpload.name)
+    const pathname = `${directory}/${editorId}/${timestamp}-${sanitized}`
+
+    const blob = await uploadToBlob(pathname, fileToUpload, {
+      access: "public",
+      contentType: fileToUpload.type,
+      handleUploadUrl: "/api/upload/handle",
+      multipart: fileToUpload.size > 50 * 1024 * 1024,
+      clientPayload: JSON.stringify({
+        editorId,
+        mediaType: options.mediaType,
+        isThumbnail: options.isThumbnail ?? false,
+        fileName: fileToUpload.name,
+        fileType: fileToUpload.type,
+        fileSize: fileToUpload.size,
+      }),
+      onUploadProgress: options.onProgress,
+    })
+
+    return blob.url
   }
 
   const getErrorSuggestions = (errorMessage: string): string[] => {
@@ -136,7 +171,7 @@ export function UploadForm({ editorId, editorName, editorType, onUploadSuccess }
     return suggestions
   }
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleSubmit = async (e: FormEvent) => {
     e.preventDefault()
     if (!file) {
       setError({ message: "Please select a file to upload" })
@@ -158,122 +193,96 @@ export function UploadForm({ editorId, editorName, editorType, onUploadSuccess }
     uploadStartTimeRef.current = Date.now()
 
     try {
-      const formData = new FormData()
-      formData.append("file", file)
-      formData.append("editorId", editorId)
-      formData.append("caption", caption)
-      formData.append("mediaType", editorType === "video" ? "video" : "image")
+      let uploadedThumbnailUrl: string | null = null
 
       if (editorType === "video" && thumbnail) {
-        formData.append("thumbnail", thumbnail)
+        try {
+          uploadedThumbnailUrl = await uploadBlob(thumbnail, {
+            mediaType: "image",
+            isThumbnail: true,
+          })
+        } catch (thumbError) {
+          const message = thumbError instanceof Error ? thumbError.message : "Failed to upload thumbnail"
+          const suggestions = getErrorSuggestions(message)
+          setError({
+            message,
+            suggestions,
+            networkInfo: networkStatus,
+          })
+          setIsLoading(false)
+          return
+        }
       }
 
-      const xhr = new XMLHttpRequest()
+      const mediaType = editorType === "video" ? "video" : "image"
 
-      xhr.timeout = 2 * 60 * 60 * 1000
-
-      xhr.upload.addEventListener("progress", (e) => {
-        if (e.lengthComputable) {
-          const percentComplete = (e.loaded / e.total) * 100
-          setUploadProgress(Math.round(percentComplete))
-
+      const blobUrl = await uploadBlob(file, {
+        mediaType,
+        onProgress: (progress) => {
+          const percentage = typeof progress.percentage === "number" ? progress.percentage : 0
+          setUploadProgress(Math.round(percentage))
           if (uploadStartTimeRef.current) {
-            const elapsedSeconds = (Date.now() - uploadStartTimeRef.current) / 1000
-            const uploadSpeedBps = e.loaded / elapsedSeconds
-            const remainingBytes = e.total - e.loaded
-            const estimatedSeconds = remainingBytes / uploadSpeedBps
+            const elapsedSeconds = Math.max((Date.now() - uploadStartTimeRef.current) / 1000, 0.001)
+            const uploadSpeedBps = progress.loaded / elapsedSeconds
+            const remainingBytes = Math.max(progress.total - progress.loaded, 0)
+            const estimatedSeconds = remainingBytes / Math.max(uploadSpeedBps, 1)
 
             setUploadSpeed(formatSpeed(uploadSpeedBps))
             setEstimatedTimeRemaining(formatTimeRemaining(estimatedSeconds))
           }
-        }
+        },
       })
 
-      xhr.addEventListener("load", () => {
-        if (xhr.status === 201 || xhr.status === 200) {
-          setFile(null)
-          setThumbnail(null)
-          setCaption("")
-          setSuccess(true)
-          setUploadProgress(100)
-          setEstimatedTimeRemaining(null)
-          setUploadSpeed(null)
-          if (fileInputRef.current) {
-            fileInputRef.current.value = ""
-          }
-          if (thumbnailInputRef.current) {
-            thumbnailInputRef.current.value = ""
-          }
-          setTimeout(() => {
-            setSuccess(false)
-            setUploadProgress(0)
-          }, 3000)
-          onUploadSuccess()
-        } else {
-          try {
-            const response = JSON.parse(xhr.responseText)
-            const suggestions = getErrorSuggestions(response.error || "")
-            setError({
-              message: response.error || "Upload failed",
-              details: response.details,
-              requestId: response.requestId,
-              suggestions,
-              networkInfo: networkStatus,
-            })
-          } catch {
-            setError({
-              message: "Upload failed. Please try again.",
-              suggestions: ["Try uploading again", "Contact support if the problem persists"],
-              networkInfo: networkStatus,
-            })
-          }
-        }
-        setIsLoading(false)
+      const response = await fetch("/api/upload", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          editorId,
+          caption: caption.trim(),
+          mediaType,
+          fileName: file.name,
+          mediaUrl: blobUrl,
+          thumbnailUrl: uploadedThumbnailUrl,
+          fileSize: file.size,
+        }),
       })
 
-      xhr.addEventListener("error", () => {
-        const suggestions = [
-          "Check your internet connection",
-          "Try uploading from a different network",
-          "Disable VPN if you're using one",
-          "Move closer to your WiFi router",
-        ]
+      if (!response.ok) {
+        const payload = await response.json().catch(() => null)
+        const message = payload?.error || "Failed to save upload metadata"
+        const suggestions = getErrorSuggestions(message)
         setError({
-          message: "Network error during upload. Please check your connection and try again.",
-          details: "Large files may require a stable connection.",
+          message,
+          details: payload?.details,
+          requestId: payload?.requestId,
           suggestions,
           networkInfo: networkStatus,
         })
         setIsLoading(false)
-      })
+        return
+      }
 
-      xhr.addEventListener("timeout", () => {
-        const suggestions = [
-          "Try uploading a smaller file first",
-          "Use a faster internet connection",
-          "Close other applications using bandwidth",
-          "Try during off-peak hours",
-        ]
-        setError({
-          message: "Upload timed out. This may happen with very large files on slow connections.",
-          details: "Please try again or use a faster connection.",
-          suggestions,
-          networkInfo: networkStatus,
-        })
-        setIsLoading(false)
-      })
-
-      xhr.addEventListener("abort", () => {
-        setError({
-          message: "Upload was cancelled",
-          suggestions: ["Try uploading again"],
-          networkInfo: networkStatus,
-        })
-        setIsLoading(false)
-      })
-
-      xhr.open("POST", "/api/upload")
-      xhr.send(formData)
+      setFile(null)
+      setThumbnail(null)
+      setCaption("")
+      setSuccess(true)
+      setUploadProgress(100)
+      setEstimatedTimeRemaining(null)
+      setUploadSpeed(null)
+      if (fileInputRef.current) {
+        fileInputRef.current.value = ""
+      }
+      if (thumbnailInputRef.current) {
+        thumbnailInputRef.current.value = ""
+      }
+      setTimeout(() => {
+        setSuccess(false)
+        setUploadProgress(0)
+      }, 3000)
+      onUploadSuccess()
+      setIsLoading(false)
     } catch (err) {
       const suggestions = getErrorSuggestions(err instanceof Error ? err.message : "")
       setError({
